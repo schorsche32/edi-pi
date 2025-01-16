@@ -80,17 +80,17 @@ tar --numeric-owner --exclude-from "${PLUGIN_DIRECTORY}/exclude-patterns" -C roo
 
 # Copy kernel, initrd and dtbs to firmware partition
 if [ -d "rootfs/boot/image-kernel" ]; then
-    cp -r -L rootfs/boot/image-kernel rootfs/boot/firmware/p3
-    sed -i "s@^BOOTLOADER_DIRECTORY=.*@BOOTLOADER_DIRECTORY=\"/boot/firmware/p3\"@" "rootfs/etc/edi-boot-shim/edi-boot-shim.cfg.d/multiboot.cfg"
+    cp -r -L rootfs/boot/image-kernel rootfs/boot/firmware/p2
+    sed -i "s@^BOOTLOADER_DIRECTORY=.*@BOOTLOADER_DIRECTORY=\"/boot/firmware/p2\"@" "rootfs/etc/edi-boot-shim/edi-boot-shim.cfg.d/multiboot.cfg"
 fi
 
 if [ -d "rootfs/boot/image-firmware" ]; then
-    cp rootfs/boot/image-firmware/cmdline.txt rootfs/boot/firmware/p3/cmdline.txt
-    sed -i 's@__ROOTFS_PARTITION__@3@' rootfs/boot/firmware/p3/cmdline.txt
+    cp rootfs/boot/image-firmware/cmdline.txt rootfs/boot/firmware/p2/cmdline.txt
+    sed -i 's@__ROOTFS_PARTITION__@2@' rootfs/boot/firmware/p2/cmdline.txt
     cp rootfs/boot/image-firmware/config.txt rootfs/boot/firmware/config.txt
-    sed -i 's@__ROOTFS_PARTITION__@3@' rootfs/boot/firmware/config.txt
-    cp rootfs/boot/image-firmware/start4.elf rootfs/boot/firmware/p3start4.elf
-    cp rootfs/boot/image-firmware/fixup4.dat rootfs/boot/firmware/p3fixup4.dat
+    sed -i 's@__ROOTFS_PARTITION__@2@' rootfs/boot/firmware/config.txt
+    cp rootfs/boot/image-firmware/start4.elf rootfs/boot/firmware/p2start4.elf
+    cp rootfs/boot/image-firmware/fixup4.dat rootfs/boot/firmware/p2fixup4.dat
 fi
 
 # Remove /etc/machine-id and /var/lib/dbus/machine-id (it should be unique for each system).

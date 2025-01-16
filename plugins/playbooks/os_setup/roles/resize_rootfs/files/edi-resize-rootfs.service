@@ -10,7 +10,7 @@ ConditionFirstBoot=yes
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/usr/bin/edi-resize-rootfs
+ExecStart=/usr/bin/edi-resize-rootfs --no-dry-run
 
 [Install]
 WantedBy=sysinit.target

@@ -24,11 +24,26 @@
 # along with the edi project configuration.  If not, see <http://www.gnu.org/licenses/>.
 
 # ----------------------------------------------------------------------------
-# adds another partition for a scondary root file system and resizes both
-# partitions in order to make use of the full available disk space
+# Usage:
+#   ./resize-rootfs.sh                # dry-run by default
+#   ./resize-rootfs.sh --no-dry-run   # actually apply changes
+#
+# Starting layout:
+#   p1 = boot
+#   p2 = rootfs (mounted at /)
+#
+# Goal:
+#   - Resize p2 to double its current size.
+#   - Create p3 of the same size (second rootfs).
+#   - Create p4 with all remaining space (mounted at /data).
 #
 # ATTENTION: Resizing file systems can lead to data loss!
 # ----------------------------------------------------------------------------
+
+DRY_RUN=true
+if [[ "${1:-}" == "--no-dry-run" ]]; then
+    DRY_RUN=false
+fi
 
 set -o nounset
 set -o errexit
@@ -55,8 +70,9 @@ abnormal_termination()
 
 trap "abnormal_termination" EXIT
 
-echo "going to resize existing rootfs partition and adding a secondary rootfs partition"
+echo "Starting script to resize rootfs, create second rootfs, and create /data partition."
 
+# 1) Check environment
 if systemd-detect-virt --container > /dev/null ; then
     print_and_exit "INFO" "detected container virtualization - not going to modify rootfs"
 fi
@@ -65,6 +81,7 @@ if [[ $EUID -ne 0 ]]; then
    print_and_exit "ERROR" "use root user to execute this script"
 fi
 
+# 2) Identify the root partition (e.g., mmcblk0p2)
 ROOT_PART=$(mount | sed -n 's|^/dev/\(.*\) on / .*|\1|p')
 if [ -z "${ROOT_PART}" ] ; then
     print_and_exit "ERROR" "unable to detect root partition device"
@@ -72,59 +89,123 @@ fi
 
 ROOT_DEV=""
 case "${ROOT_PART}" in
-    mmcblk0*) ROOT_DEV=mmcblk0 ;;
-    sda*)     ROOT_DEV=sda ;;
+    mmcblk0p*) ROOT_DEV="mmcblk0" ;;
+    sda[0-9]*) ROOT_DEV="sda" ;;
 esac
 
 if [ -z "${ROOT_DEV}" ] ; then
-    print_and_exit "ERROR" "${ROOT_PART} does not look like a SD card"
+    print_and_exit "ERROR" "${ROOT_PART} does not look like an SD card or standard disk device."
 fi
 
 if [ "${ROOT_DEV}" = "${ROOT_PART}" ] ; then
-    print_and_exit "ERROR" "${ROOT_PART} does not look like a partition"
+    print_and_exit "ERROR" "${ROOT_PART} does not look like a partition (missing p#?)."
 fi
 
-PART_NUM=$(echo ${ROOT_PART} | grep -o '[1-9][0-9]*$')
+PART_NUM=$(echo "${ROOT_PART}" | grep -o '[1-9][0-9]*$')
 if [ -z "${PART_NUM}" ] ; then
-    print_and_exit "ERROR" "unable to extract partition number of ${ROOT_PART}"
+    print_and_exit "ERROR" "Unable to extract the partition number from ${ROOT_PART}."
 fi
 
+# 3) Gather disk info using parted
 PARTITION_INFO=$(parted /dev/${ROOT_DEV} -ms unit s print)
 
-DISK_SIZE_S=$(echo "${PARTITION_INFO}" | grep -o "^/dev/${ROOT_DEV}.*" | cut -d':' -f2 | sed 's/s//g')
-ROOTFS_START_S=$(echo "${PARTITION_INFO}" | tail -n 1 | cut -d':' -f2 | sed 's/s//g')
-ROOTFS_SIZE_S=$(echo "${PARTITION_INFO}" | tail -n 1 | cut -d':' -f4 | sed 's/s//g')
+DISK_SIZE_S=$(echo "${PARTITION_INFO}" | grep "^/dev/${ROOT_DEV}" | cut -d':' -f2 | sed 's/s//g')
+# We assume the *last line* from parted is the rootfs partition
+ROOTFS_LINE=$(echo "${PARTITION_INFO}" | tail -n 1)
 
-if [ "$(expr ${ROOTFS_START_S} + ${ROOTFS_SIZE_S} + 1)" -lt "${DISK_SIZE_S}" ] ; then
-    LAST_PART_NUM=$(echo "${PARTITION_INFO}" | tail -n 1 | cut -f 1 -d':')
-    if [ ${LAST_PART_NUM} -ne ${PART_NUM} ]; then
-        print_and_exit "ERROR" "${ROOT_PART} is not the last partition"
-    fi
+# Extract rootfs start & size (in sectors)
+ROOTFS_START_S=$(echo "${ROOTFS_LINE}" | cut -d':' -f2 | sed 's/s//g')
+ROOTFS_SIZE_S=$(echo "${ROOTFS_LINE}" | cut -d':' -f4 | sed 's/s//g')
 
-    SPLIT_SIZE_S=$(expr $(expr ${DISK_SIZE_S} - ${ROOTFS_START_S}) \/ 2)
+# 4) Calculate new sizes
+NEW_ROOTFS_SIZE_S=$(( ROOTFS_SIZE_S * 2 ))
 
-    if [ "${SPLIT_SIZE_S}" -lt "${ROOTFS_SIZE_S}" ] ; then
-        print_and_exit "ERROR" "${ROOT_DEV} is too small to duplicate the root file system"
-    fi
+TOTAL_ROOTFS_TAKE_S=$(( NEW_ROOTFS_SIZE_S + NEW_ROOTFS_SIZE_S ))
 
-    TEMP_PARTITION_TABLE=$(mktemp /tmp/partition-table.XXXXXX)
+REMAINING_SIZE_S=$(( DISK_SIZE_S - ROOTFS_START_S - TOTAL_ROOTFS_TAKE_S ))
 
-    # dump the existing disk layout
-    sfdisk -d /dev/${ROOT_DEV} > ${TEMP_PARTITION_TABLE}
-    # remove line that describes last (root) partition
-    sed -i '$ d' ${TEMP_PARTITION_TABLE}
-
-    # add two new partitions with the same size
-    NEW_ROOT_PART=${ROOT_DEV}p$(expr ${PART_NUM} + 1)
-    echo "/dev/${ROOT_PART}: start=${ROOTFS_START_S} size=${SPLIT_SIZE_S}, type=83" >> ${TEMP_PARTITION_TABLE}
-    echo "/dev/${NEW_ROOT_PART}: start=$(expr ${ROOTFS_START_S} + ${SPLIT_SIZE_S}) size=${SPLIT_SIZE_S}, type=83" >> ${TEMP_PARTITION_TABLE}
-
-    sfdisk --no-reread /dev/${ROOT_DEV} < ${TEMP_PARTITION_TABLE}
-
-    partprobe
+if [ "${REMAINING_SIZE_S}" -le 0 ] ; then
+    print_and_exit "ERROR" "Not enough space to double rootfs, create second rootfs, and have leftover for /data."
 fi
 
-resize2fs /dev/${ROOT_PART}
+P3_START_S=$(( ROOTFS_START_S + NEW_ROOTFS_SIZE_S ))
+P3_SIZE_S=${NEW_ROOTFS_SIZE_S}
 
-print_and_exit "INFO" "disk layout of ${ROOT_DEV} successfully changed"
+P4_START_S=$(( P3_START_S + P3_SIZE_S ))
+P4_SIZE_S=${REMAINING_SIZE_S}
+
+# 5) Prepare an sfdisk script:
+TEMP_PARTITION_TABLE=$(mktemp /tmp/partition-table.XXXXXX)
+
+# Dump current layout
+sfdisk -d /dev/${ROOT_DEV} > "${TEMP_PARTITION_TABLE}"
+
+# remove line that describes last (root) partition
+sed -i "/\/dev\/${ROOT_DEV}p${PART_NUM}/d" "${TEMP_PARTITION_TABLE}"
+
+SECOND_PART_NUM=$(( PART_NUM + 1 ))  # typically 3 if PART_NUM was 2
+THIRD_PART_NUM=$(( PART_NUM + 2 ))   # typically 4 if PART_NUM was 2
+
+# 6) Append new definitions to the sfdisk table
+cat << EOF >> "${TEMP_PARTITION_TABLE}"
+/dev/${ROOT_DEV}p${PART_NUM}: start=${ROOTFS_START_S}, size=${NEW_ROOTFS_SIZE_S}, type=83
+/dev/${ROOT_DEV}p${SECOND_PART_NUM}: start=${P3_START_S}, size=${P3_SIZE_S}, type=83
+/dev/${ROOT_DEV}p${THIRD_PART_NUM}: start=${P4_START_S}, size=${P4_SIZE_S}, type=83
+EOF
+
+echo "------------------------------------------------------"
+echo "Proposed new partition table:"
+cat "${TEMP_PARTITION_TABLE}"
+echo "------------------------------------------------------"
+
+# 7) Write the partition table
+if [ "${DRY_RUN}" = true ] ; then
+    echo "[DRY-RUN]: Would run sfdisk --no-reread /dev/${ROOT_DEV}"
+    sfdisk --no-reread --no-act /dev/${ROOT_DEV} < "${TEMP_PARTITION_TABLE}"
+else
+    echo "Applying new partition table to /dev/${ROOT_DEV}..."
+    sfdisk --no-reread /dev/${ROOT_DEV} < "${TEMP_PARTITION_TABLE}"
+    partprobe /dev/${ROOT_DEV}
+fi
+
+# 8) Resize old rootfs (p2), create p3, p4 filesystems, mount p4 at /data
+if [ "${DRY_RUN}" = true ] ; then
+    echo "[DRY-RUN]: Skipping resize2fs, mkfs, and mount operations."
+else
+    echo "Resizing filesystem on /dev/${ROOT_PART} (p2) to its new size..."
+    resize2fs "/dev/${ROOT_PART}"
+
+    echo "Creating ext4 filesystem on p3 (/dev/${ROOT_DEV}p${SECOND_PART_NUM})..."
+    mkfs.ext4 "/dev/${ROOT_DEV}p${SECOND_PART_NUM}"
+
+    echo "Creating ext4 filesystem on p4 (/dev/${ROOT_DEV}p${THIRD_PART_NUM})..."
+    mkfs.ext4 "/dev/${ROOT_DEV}p${THIRD_PART_NUM}"
+
+    echo "Mounting p4 (/dev/${ROOT_DEV}p${THIRD_PART_NUM}) at /data..."
+    
+    # Step 1: Prepare and copy data by temporary mounting the data partition
+    TEMP_MOUNT="/mnt/newdata"
+    mkdir -p "${TEMP_MOUNT}"
+    mount "/dev/${ROOT_DEV}p${THIRD_PART_NUM}" "${TEMP_MOUNT}"
+    cp -a /data/. "${TEMP_MOUNT}"
+    umount "${TEMP_MOUNT}"
+
+    # Step 2: Backup old data and set up the new mount point
+    DATA_BACKUP="/data_old"
+    mv /data "${DATA_BACKUP}"
+    mkdir /data
+    echo "/dev/mmcblk0p4 /data ext4 defaults 0 0" >> /etc/fstab
+    mount -a
+
+    # Step 3: Verify the copied content
+    echo "Verifying copied content from /data to the new persistent partition"
+    if diff -r --exclude="lost+found" "${DATA_BACKUP}" /data; then
+        echo "Verification successful: Contents match."
+        rm -rf "${DATA_BACKUP}"
+    else
+        print_and_exit "ERROR" "Verification failed: Contents differ."
+    fi
+fi
+
+print_and_exit "INFO" "disk layout of ${ROOT_DEV} successfully changed. Resized p2, created p3, and mounted p4 at /data."
 

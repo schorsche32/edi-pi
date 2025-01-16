@@ -70,8 +70,8 @@ if [ -z "${CURRENT_BOOT_PART}" ] ; then
     print_and_exit "ERROR" "unable to extract partition number of ${CURRENT_BOOT_DEVICE}"
 fi
 
-BOOT_PART_NUMBER_A=3
-BOOT_PART_NUMBER_B=4
+BOOT_PART_NUMBER_A=2
+BOOT_PART_NUMBER_B=3
 
 NEXT_BOOT_PART=""
 
@@ -89,6 +89,14 @@ NEXT_BOOT_FOLDER="/boot/firmware/p${NEXT_BOOT_PART}"
 NEXT_ROOT_MNT=$(mktemp -d -t next-root-XXXXXXXX --tmpdir=/tmp)
 
 mount "/dev/mmcblk0p${NEXT_BOOT_PART}" "${NEXT_ROOT_MNT}"
+
+### Remove the content of the /data folder as this will be used to mount the persistant partition
+rm -rf "${NEXT_ROOT_MNT}/data"
+mkdir "${NEXT_ROOT_MNT}/data"
+
+### Copy the /etc/fstab file to the next image
+rm  "${NEXT_ROOT_MNT}/etc/fstab"
+cp /etc/fstab "${NEXT_ROOT_MNT}/etc/fstab"
 
 rm -rf "${NEXT_BOOT_FOLDER}"
 cp -r -L "${NEXT_ROOT_MNT}/boot/image-kernel" "${NEXT_BOOT_FOLDER}"
