@@ -14,6 +14,11 @@
     name: edi-boot-shim
     install_recommends: no
 
+- name: Copy the correct boot.spec.rpi5.arm64 for edi-boot-shim.
+  ansible.builtin.copy:
+    src: "files/boot.spec.rpi5.arm64"
+    dest: "/etc/edi-boot-shim/boot.spec.rpi5.arm64"
+
 - name: Create boot firmware directory.
   file:
     path: "{{ bootloader_location }}"
